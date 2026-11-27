@@ -74,7 +74,9 @@ class BaseModuleService:
                         "shipment_id", "shipment_no", "upstream_module", "upstream_id",
                         "fermentation_warning", "moisture_warning", "linked_defects",
                         "audit_ref", "上游工序", "上游记录ID", "批次号", "登记编号",
-                        "序号"]
+                        "序号", "request_id", "留样编号", "关联送检单号", "关联送检单ID",
+                        "实际退回重量", "申报退回重量", "冲突标记", "实物重量依据",
+                        "受理重量", "柜内余量", "留样重量"]
         for ef in extra_fields:
             if ef in values:
                 entry[ef] = values[ef]
@@ -123,7 +125,7 @@ class BaseModuleService:
                 return None, f"{self.ENTITY}撤回操作被业务规则拒绝"
 
         entry["status"] = target
-        entry["pending"] = target != self.STATUS_ORDER[-1]
+        entry["pending"] = target not in (self.STATUS_ORDER[-1], "已确认")
         entry["abnormal"] = action in self.NEGATIVE_ACTIONS
 
         store.log_event(self.MODULE, entry_id, action, {"from": current, "to": target})

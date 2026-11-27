@@ -18,6 +18,9 @@ from app.services.certification import CertificationService
 from app.services.trace_code import TraceCodeService
 from app.services.shipment import ShipmentService
 from app.services.sample import SampleService
+from app.services.sample_dispatch import SampleDispatchService
+from app.services.sample_return import SampleReturnService
+from app.services.testing_receipt import TestingReceiptService
 from app.services.defect import DefectService
 from app.services.audit import AuditService
 
@@ -38,6 +41,9 @@ SERVICES: dict[str, BaseModuleService] = {
     "trace_code": TraceCodeService(),
     "shipment": ShipmentService(),
     "sample": SampleService(),
+    "sample_dispatch": SampleDispatchService(),
+    "sample_return": SampleReturnService(),
+    "testing_receipt": TestingReceiptService(),
     "defect": DefectService(),
     "audit": AuditService(),
 }

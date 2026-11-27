@@ -9,6 +9,15 @@
         <button class="btn primary" data-testid="open-create" type="button" @click="openCreate">
           登记{{ meta.entity }}
         </button>
+        <button
+          v-if="meta.key === 'testing_receipt'"
+          class="btn primary"
+          data-testid="open-import"
+          type="button"
+          @click="openImport"
+        >
+          导入签收结果文件
+        </button>
         <button class="btn" data-testid="export" type="button" @click="exportRows">
           导出{{ meta.name }}清单
         </button>
@@ -71,7 +80,9 @@
         </tr>
       </thead>
       <tbody>
-        <tr v-for="row in rows" :key="String(row.id)" :data-testid="`row-${row.id}`" :data-status="String(row.status)">
+        <tr v-for="row in rows" :key="String(row.id)" :data-testid="`row-${row.id}`"
+          :data-status="String(row.status)"
+          :class="{ 'conflict-row': meta.key === 'sample_return' && row['冲突标记'] }">
           <td v-for="column in meta.fields" :key="column">{{ row[column] ?? '—' }}</td>
           <td>{{ row.status }}</td>
           <td class="row-actions">
@@ -100,6 +111,24 @@
               @click="viewUpstream(row)" title="查看上游工序">
               查看上游
             </button>
+            <button
+              v-if="meta.key === 'sample' && row['留样编号']"
+              class="link cabinet-link"
+              type="button"
+              :data-testid="`cabinet-${row.id}`"
+              @click="openCabinet(String(row['留样编号']))"
+              title="查看留样柜实物台账">
+              留样柜台账
+            </button>
+            <button
+              v-if="meta.key === 'testing_receipt'"
+              class="link cabinet-link"
+              type="button"
+              :data-testid="`receipt-detail-${row.id}`"
+              @click="openReceiptDetail(Number(row.id))"
+              title="查回原送检文件与最终受理值">
+              查回原文件
+            </button>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -126,6 +155,109 @@
       </form>
     </div>
 
+    <!-- 检测机构签收结果文件导入 -->
+    <div v-if="showImport" class="modal-backdrop" data-testid="import-modal">
+      <form class="modal import-modal" @submit.prevent="submitImport">
+        <h3>导入检测机构签收结果文件</h3>
+        <p class="modal-tip">只受理原交检凭据内的留样编号与所需检测机构；文件里其他茶批报告将被拒收，不进入本次样品交检账。</p>
+        <label class="create-field">
+          <span>文件名</span>
+          <input v-model="importForm.文件名" data-testid="import-filename" required />
+        </label>
+        <label class="create-field">
+          <span>文件指纹（去重键）</span>
+          <input v-model="importForm.文件指纹" data-testid="import-hash" required />
+        </label>
+        <label class="create-field">
+          <span>检测机构</span>
+          <input v-model="importForm.检测机构" data-testid="import-lab" required />
+        </label>
+        <label class="create-field">
+          <span>报告明细（每行一条 JSON）</span>
+          <textarea
+            v-model="importRowsText"
+            data-testid="import-rows"
+            rows="8"
+            :placeholder="importRowsPlaceholder"
+            required
+          ></textarea>
+        </label>
+        <div v-if="importResult" class="import-result" :class="{ dedup: importResult.deduplicated }">
+          <p>{{ importResult.message }}</p>
+          <p v-if="importResult.deduplicated" class="dedup-text">重复文件未追加报告，已返回原送检文件与最终受理值。</p>
+          <ul v-if="importResult.accepted?.length">
+            <li v-for="item in importResult.accepted" :key="item.报告编号">
+              受理：{{ item.留样编号 }} / {{ item.报告编号 }}（签收状态：{{ item.签收状态 }}）
+            </li>
+          </ul>
+          <ul v-if="importResult.rejected?.length" class="reject-list">
+            <li v-for="item in importResult.rejected" :key="`${item.报告编号}-${item.留样编号}`">
+              拒收：{{ item.留样编号 }} / {{ item.报告编号 }} —— {{ item.拒收原因 }}
+            </li>
+          </ul>
+        </div>
+        <div class="page-actions">
+          <button class="btn" type="button" @click="showImport = false">关闭</button>
+          <button class="btn primary" data-testid="submit-import" type="submit" :disabled="importing">
+            {{ importing ? '导入中…' : '确认导入' }}
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <!-- 留样柜实物台账 -->
+    <div v-if="showCabinet" class="modal-backdrop" data-testid="cabinet-modal">
+      <div class="modal">
+        <h3>留样柜实物台账：{{ cabinetData?.留样编号 }}</h3>
+        <div v-if="cabinetData" class="cabinet-grid">
+          <span>留样登记重量：<strong>{{ cabinetData.留样登记重量 }}kg</strong></span>
+          <span>累计支取：<strong>{{ cabinetData.累计支取 }}kg</strong></span>
+          <span>累计实际退回：<strong>{{ cabinetData.累计实际退回 }}kg</strong></span>
+          <span>当前柜内可用：<strong class="balance">{{ cabinetData.当前柜内可用 }}kg</strong></span>
+        </div>
+        <table v-if="cabinetData" class="data-table mini-table">
+          <thead>
+            <tr><th>流水类型</th><th>实物重量</th><th>重量依据</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="(m, idx) in cabinetData.流水" :key="idx">
+              <td>{{ m.movement }}</td>
+              <td>{{ m.weight }}kg</td>
+              <td>{{ m.basis }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="page-actions">
+          <button class="btn primary" type="button" @click="showCabinet = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 签收文件查回 -->
+    <div v-if="showReceiptDetail" class="modal-backdrop" data-testid="receipt-modal">
+      <div class="modal">
+        <h3>原送检文件查回：{{ receiptDetail?.文件名 }}</h3>
+        <div v-if="receiptDetail">
+          <p>文件指纹：{{ receiptDetail.文件指纹 }} ｜ 检测机构：{{ receiptDetail.检测机构 }}</p>
+          <h4>最终受理值（{{ receiptDetail.最终受理值.length }}）</h4>
+          <ul>
+            <li v-for="item in receiptDetail.最终受理值" :key="item.报告编号">
+              {{ item.留样编号 }} / {{ item.报告编号 }} / 受理重量 {{ item.受理重量 }}kg
+            </li>
+          </ul>
+          <h4>拒收明细（{{ receiptDetail.拒收明细.length }}）</h4>
+          <ul class="reject-list">
+            <li v-for="item in receiptDetail.拒收明细" :key="`${item.报告编号}-${item.留样编号}`">
+              {{ item.留样编号 }} / {{ item.报告编号 }} —— {{ item.拒收原因 }}
+            </li>
+          </ul>
+        </div>
+        <div class="page-actions">
+          <button class="btn primary" type="button" @click="showReceiptDetail = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
     <footer class="page-foot">
       <span>共 {{ total }} 条{{ meta.name }}记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
@@ -145,6 +277,14 @@ import {
   runAction as applyAction,
 } from '@/api/backend-service'
 import { fetchTraceChain } from '@/api/pipeline-client'
+import {
+  fetchCabinetSnapshot,
+  fetchReceiptDetail,
+  importReceiptFile,
+  type CabinetSnapshot,
+  type ReceiptImportResult,
+  type ReceiptRow,
+} from '@/api/sample-service'
 import type { EntryRow } from '@/data/types'
 
 const props = defineProps<{ moduleKey: string }>()
@@ -280,6 +420,82 @@ function viewUpstream(row: EntryRow) {
   }
 }
 
+// ── 签收结果文件导入 ──
+
+const showImport = ref(false)
+const importing = ref(false)
+const importResult = ref<ReceiptImportResult | null>(null)
+const importForm = ref({ 文件名: '', 文件指纹: '', 检测机构: '' })
+const importRowsText = ref('')
+const importRowsPlaceholder = JSON.stringify(
+  [{ 留样编号: 'SAMP-0001', 报告编号: 'RPT-0001', 农残项目: '农残合格', 签发日期: '2026-11-20', 受理重量: '0.6' }],
+  null,
+  2,
+)
+
+function openImport() {
+  importForm.value = { 文件名: '', 文件指纹: '', 检测机构: '' }
+  importRowsText.value = ''
+  importResult.value = null
+  errorMessage.value = ''
+  showImport.value = true
+}
+
+async function submitImport() {
+  importing.value = true
+  errorMessage.value = ''
+  try {
+    let rows: ReceiptRow[]
+    try {
+      rows = JSON.parse(importRowsText.value) as ReceiptRow[]
+      if (!Array.isArray(rows)) throw new Error('not-array')
+    } catch {
+      throw new Error('报告明细需为 JSON 数组，每行包含留样编号、报告编号等字段')
+    }
+    importResult.value = await importReceiptFile({
+      文件名: importForm.value.文件名,
+      文件指纹: importForm.value.文件指纹,
+      检测机构: importForm.value.检测机构,
+      报告明细: rows,
+    })
+    await reload()
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '签收结果导入失败'
+  } finally {
+    importing.value = false
+  }
+}
+
+// ── 留样柜实物台账 ──
+
+const showCabinet = ref(false)
+const cabinetData = ref<CabinetSnapshot | null>(null)
+
+async function openCabinet(sampleNo: string) {
+  errorMessage.value = ''
+  try {
+    cabinetData.value = await fetchCabinetSnapshot(sampleNo)
+    showCabinet.value = true
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '留样柜台账读取失败'
+  }
+}
+
+// ── 签收文件查回 ──
+
+const showReceiptDetail = ref(false)
+const receiptDetail = ref<Awaited<ReturnType<typeof fetchReceiptDetail>> | null>(null)
+
+async function openReceiptDetail(receiptId: number) {
+  errorMessage.value = ''
+  try {
+    receiptDetail.value = await fetchReceiptDetail(receiptId)
+    showReceiptDetail.value = true
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '受理文件查回失败'
+  }
+}
+
 onMounted(reload)
 </script>
 
@@ -371,5 +587,82 @@ onMounted(reload)
 .trace-link:hover, .upstream-link:hover {
   background: #27ae60;
   color: white !important;
+}
+.cabinet-link {
+  color: #8e44ad !important;
+  margin-left: 6px;
+  padding: 2px 6px;
+  font-size: 11px;
+  border: 1px solid #8e44ad;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.cabinet-link:hover {
+  background: #8e44ad;
+  color: white !important;
+}
+.conflict-row {
+  background: #fff5e6 !important;
+}
+.conflict-row td {
+  border-top: 1px solid #f0ad4e;
+}
+.modal {
+  max-height: 86vh;
+  overflow-y: auto;
+}
+.import-modal textarea {
+  width: 100%;
+  font-family: monospace;
+  font-size: 12px;
+  padding: 8px;
+  border: 1px solid #cfd8dc;
+  border-radius: 4px;
+  resize: vertical;
+}
+.modal-tip {
+  font-size: 12px;
+  color: #7f8c8d;
+  background: #f3f8ff;
+  padding: 8px;
+  border-radius: 4px;
+}
+.import-result {
+  margin: 10px 0;
+  padding: 10px;
+  border-radius: 4px;
+  background: #eafaf1;
+  border: 1px solid #27ae60;
+  font-size: 12px;
+}
+.import-result.dedup {
+  background: #fef9e7;
+  border-color: #f1c40f;
+}
+.dedup-text {
+  color: #b9770e;
+}
+.reject-list {
+  color: #c0392b;
+}
+.cabinet-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin: 10px 0;
+  padding: 10px;
+  background: #f8f9fa;
+  border-radius: 4px;
+  font-size: 13px;
+}
+.cabinet-grid .balance {
+  color: #27ae60;
+  font-size: 15px;
+}
+.mini-table {
+  font-size: 12px;
+}
+.mini-table th, .mini-table td {
+  padding: 6px 8px;
 }
 </style>

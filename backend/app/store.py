@@ -24,8 +24,14 @@ class Store:
         self._idempotency: dict[str, dict[str, Any]] = {}
         # 冻结标记：被不合格处置关联的记录 id -> True
         self._frozen: dict[tuple[str, int], str] = {}
+        # 留样柜实物台账流水：每项
+        # {"sample_no": str, "movement": "入库"/"支取"/"退回", "weight": float,
+        #  "ref_module": str, "ref_id": int, "request_id": str, "ts": float, "basis": str}
+        self._sample_movements: list[dict[str, Any]] = []
         # 初始化建种子血缘索引
         self._build_lineage_from_seed()
+        # 为种子留样补建期初入库流水，保证留样柜实物台账口径完整
+        self._build_seed_sample_stock()
 
     # ── 表操作 ──
 
@@ -152,6 +158,87 @@ class Store:
         row["产出重量"] = output_weight
         return output_weight
 
+    # ── 留样柜实物台账 ──
+
+    def sample_movements(self, sample_no: str | None = None) -> list[dict[str, Any]]:
+        """读取留样柜流水；可按留样编号过滤，保持发生顺序。"""
+        if sample_no is None:
+            return list(self._sample_movements)
+        return [m for m in self._sample_movements if m.get("sample_no") == sample_no]
+
+    def has_sample_movement(self, request_id: str) -> dict[str, Any] | None:
+        """按幂等键查找已落账的柜内流水。"""
+        if not request_id:
+            return None
+        for m in self._sample_movements:
+            if m.get("request_id") == request_id:
+                return m
+        return None
+
+    def add_sample_movement(self, sample_no: str, movement: str, weight: float,
+                            ref_module: str, ref_id: int, request_id: str = "",
+                            basis: str = "") -> dict[str, Any]:
+        """登记一条留样柜实物流水（支取/退回/入库）。
+
+        同一 request_id 只落账一次，避免两个入口都认为退回完成而重复增加余量。
+        """
+        existing = self.has_sample_movement(request_id)
+        if existing is not None:
+            return existing
+        record = {
+            "sample_no": sample_no,
+            "movement": movement,
+            "weight": round(float(weight), 3),
+            "ref_module": ref_module,
+            "ref_id": ref_id,
+            "request_id": request_id,
+            "basis": basis,
+            "ts": time.time(),
+        }
+        self._sample_movements.append(record)
+        self.log_event("sample_cabinet", ref_id, movement,
+                       {"sample_no": sample_no, "weight": record["weight"],
+                        "ref_module": ref_module, "request_id": request_id, "basis": basis})
+        return record
+
+    def sample_initial_weight(self, sample_no: str) -> float:
+        """取留样登记的原始实物重量（公斤）；无登记重量时按 0 处理。"""
+        for row in self.rows("sample"):
+            if row.get("留样编号") == sample_no:
+                return self.parse_weight(row.get("留样重量", 0))
+        return 0.0
+
+    def sample_cabinet_balance(self, sample_no: str) -> float:
+        """计算某瓶留样当前柜内可用实物重量。
+
+        柜内余量完全由实物台账流水推导（入库/退回为加，支取为减），
+        留样登记重量不另行叠加，避免期初被重复计入。
+        退回累计不会把余量抬到期初之上，由业务服务在登记退回流水前再做上限校验。
+        """
+        balance = 0.0
+        for m in self._sample_movements:
+            if m.get("sample_no") != sample_no:
+                continue
+            if m["movement"] in ("入库", "退回"):
+                balance = round(balance + float(m["weight"]), 3)
+            elif m["movement"] == "支取":
+                balance = round(balance - float(m["weight"]), 3)
+        return max(round(balance, 3), 0.0)
+
+    def sample_total_drawn(self, sample_no: str) -> float:
+        """累计已从柜中支取的实物重量。"""
+        return round(sum(
+            float(m["weight"]) for m in self._sample_movements
+            if m.get("sample_no") == sample_no and m["movement"] == "支取"
+        ), 3)
+
+    def sample_total_returned(self, sample_no: str) -> float:
+        """累计实际退回柜中的实物重量。"""
+        return round(sum(
+            float(m["weight"]) for m in self._sample_movements
+            if m.get("sample_no") == sample_no and m["movement"] == "退回"
+        ), 3)
+
     # ── 种子血缘初始化 ──
 
     def _build_lineage_from_seed(self) -> None:
@@ -164,6 +251,19 @@ class Store:
                 batch_no = row.get("批次号") or row.get("登记编号", "")
                 if batch_no and "BATCH-" in str(batch_no):
                     self.register_lineage(batch_no, mod, int(row["id"]))
+
+    def _build_seed_sample_stock(self) -> None:
+        """种子留样按登记重量补建入库流水，作为留样柜台账期初。"""
+        for row in self.rows("sample"):
+            sample_no = str(row.get("留样编号", "")).strip()
+            weight = self.parse_weight(row.get("留样重量", 0))
+            if not sample_no or weight <= 0:
+                continue
+            self.add_sample_movement(
+                sample_no, "入库", weight, "sample", int(row["id"]),
+                request_id=f"sample-in-{row['id']}",
+                basis=f"留样登记{sample_no}期初入库{weight}kg",
+            )
 
 
 store = Store()

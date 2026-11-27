@@ -1,4 +1,11 @@
-"""检测报告领域服务：签收检测报告，作为后续工序推进门禁，关联批次与工序节点。"""
+"""检测报告领域服务：签收检测报告，作为后续工序推进门禁，关联批次与工序节点。
+
+签收报告只能从关联的样品交检账（sample_dispatch）办理：
+- 报告必须挂在一笔实际成功交检（已确认）的留样送检单下；
+- 交检账里的留样编号与检测机构即报告的受理范围；
+- 报告记录受理重量与实物重量依据，便于品控核对原样消耗。
+导入的签收材料只生成草稿，实际签收仍在检测工作台完成。
+"""
 from __future__ import annotations
 from typing import Any
 from app.services.base import BaseModuleService
@@ -8,7 +15,8 @@ class TestingService(BaseModuleService):
     MODULE = "testing"
     ENTITY = "检测报告"
     OPERATION_TERM = "签收报告"
-    LIST_FIELDS = ["农残项目", "检测机构", "报告编号", "签发日期", "登记编号", "负责人", "生效版本", "备注说明"]
+    LIST_FIELDS = ["农残项目", "检测机构", "报告编号", "签发日期", "留样编号",
+                   "受理重量", "实物重量依据", "登记编号", "负责人", "生效版本", "备注说明"]
     REQUIRED_FIELDS = ["农残项目", "检测机构", "报告编号", "签发日期"]
     STATUS_ORDER = ["草稿", "待确认", "已确认", "已撤回"]
     ACTION_RULES = {"签收报告": "已确认", "提交确认": "待确认", "撤回记录": "已撤回"}
@@ -27,10 +35,28 @@ class TestingService(BaseModuleService):
             lineage = store.get_batch_lineage_nodes(batch_no)
             if not lineage:
                 errors.append(f"批次 {batch_no} 在血缘中无记录，请先确认批次存在")
+        # 手工登记报告时，若指定留样编号，必须有对应成功交检账
+        sample_no = str(values.get("留样编号", "")).strip()
+        lab = str(values.get("检测机构", "")).strip()
+        if sample_no:
+            dispatch = self._find_accepted_dispatch(sample_no, lab)
+            if dispatch is None:
+                errors.append(
+                    f"留样编号 {sample_no} 在检测机构 {lab} 名下无实际成功交检的样品交检账，"
+                    "报告签收仅适用实际成功交检的样品"
+                )
         return errors
 
+    def _find_accepted_dispatch(self, sample_no: str, lab: str) -> dict[str, Any] | None:
+        for row in store.rows("sample_dispatch"):
+            if (row.get("留样编号") == sample_no
+                    and str(row.get("检测机构", "")).strip() == str(lab).strip()
+                    and row.get("status") == "已确认"):
+                return row
+        return None
+
     def on_confirm(self, entry: dict[str, Any], action: str) -> tuple[bool, str | None]:
-        """签收报告后，关联到相关批次。"""
+        """签收报告前，核对关联样品交检账与实物重量依据。"""
         if action == "签收报告":
             try:
                 from datetime import datetime
@@ -40,6 +66,22 @@ class TestingService(BaseModuleService):
                     return False, "签发日期不能晚于当前日期"
             except ValueError:
                 pass
+
+            sample_no = str(entry.get("留样编号", "")).strip()
+            lab = str(entry.get("检测机构", "")).strip()
+            if not sample_no:
+                return False, "报告缺少留样编号，无法核对样品交检账，不能签收"
+            dispatch = self._find_accepted_dispatch(sample_no, lab)
+            if dispatch is None:
+                return False, (
+                    f"留样编号 {sample_no} 在检测机构 {lab} 名下无实际成功交检的样品交检账，"
+                    "报告签收仅适用实际成功交检的样品"
+                )
+            # 回填交检账关联与实物重量依据（导入草稿可能未带全）
+            entry["关联送检单ID"] = int(dispatch["id"])
+            if not entry.get("受理重量"):
+                entry["受理重量"] = dispatch.get("支取重量", "")
+            entry["实物重量依据"] = dispatch.get("实物重量依据", "")
         return True, None
 
     def has_valid_report(self) -> bool:

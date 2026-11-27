@@ -303,6 +303,15 @@ class TestDefectFreezeDownstream(unittest.TestCase):
         # 检查冻结状态（defect 模块已在 'fixing' 发现节点后冻结fixing 和 downstream)
         self.assertGreaterEqual(frozen_count, 0)
 
+    def tearDown(self):
+        # 清理本测试产生的冻结标记，避免全局单例状态污染后续工序推进测试
+        store._frozen.clear()
+        for mod in store.module_names():
+            for row in store.rows(mod):
+                if row.get("frozen"):
+                    row["frozen"] = False
+                    row.pop("freeze_reason", None)
+
 
 class TestSampleLinkToProcess(unittest.TestCase):
     """测试6: 样品留样关联工序节点。"""
